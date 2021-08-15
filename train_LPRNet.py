@@ -20,7 +20,10 @@ import torch
 import time
 import os
 import csv
-from matplotlib import pyplot as plt
+import math
+from utils.general import increment_path
+from utils.plot import plotChart
+from pathlib import Path
 
 def sparse_tuple_for_ctc(T_length, lengths):
     input_lengths = []
@@ -70,8 +73,10 @@ def get_parser():
     # my code
     # parser.add_argument('--lr_schedule', default=[4, 8, 12, 14, 16], help='schedule for learning rate.')
     parser.add_argument('--save_folder', default='./weights/', help='Location to save checkpoint models')
+    parser.add_argument('--project', default='./runs/train', help='save to project/name')
+    parser.add_argument('--name', default='exp', help='save to project/name')
     # parser.add_argument('--pretrained_model', default='./weights/Final_LPRNet_model.pth', help='pretrained base model')
-    parser.add_argument('--pretrained_model', default='', help='pretrained base model')
+    parser.add_argument('--pretrained_model', default='./weights/Final_LPRNet_model_bak.pth', help='pretrained base model')
 
     args = parser.parse_args()
 
@@ -130,23 +135,27 @@ def train():
         print("initial net weights successful!")
 
     # define optimizer
-    # optimizer = optim.SGD(lprnet.parameters(), lr=args.learning_rate,
-    #                       momentum=args.momentum, weight_decay=args.weight_decay)
-    optimizer = optim.RMSprop(lprnet.parameters(), lr=args.learning_rate, alpha = 0.9, eps=1e-08,
-                         momentum=args.momentum, weight_decay=args.weight_decay)
+    optimizer = optim.SGD(lprnet.parameters(), lr=args.learning_rate,
+                          momentum=args.momentum, weight_decay=args.weight_decay)
+    # optimizer = optim.RMSprop(lprnet.parameters(), lr=args.learning_rate, alpha = 0.9, eps=1e-08,
+    #                      momentum=args.momentum, weight_decay=args.weight_decay)
+    # here is my code
+    # optimizer = torch.optim.Adam(lprnet.parameters(), lr=args.learning_rate, betas=(args.weight_decay, 0.999))
 
     # here is my code
-    torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.max_epoch)
+    # lr自动调整器
+    lf = lambda e: (((1 + math.cos(e * math.pi / int(args.max_epoch))) / 2) ** 1.0) * 0.8 + 0.2  # cosine
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
 
     train_img_dirs = os.path.expanduser(args.train_img_dirs)
     test_img_dirs = os.path.expanduser(args.test_img_dirs)
     train_dataset = LPRDataLoader(train_img_dirs.split(','), args.img_size, int(args.lpr_max_len))  # my code
     test_dataset = LPRDataLoader(test_img_dirs.split(','), args.img_size, args.lpr_max_len)
 
-    epoch_size = len(train_dataset) // args.train_batch_size
+    epoch_size = len(train_dataset) // int(args.train_batch_size)
     max_iter = args.max_epoch * epoch_size
 
-    ctc_loss = nn.CTCLoss(blank=len(CHARS)-1, reduction='mean') # reduction: 'none' | 'mean' | 'sum'
+    ctc_loss = nn.CTCLoss(blank=len(CHARS)-1, reduction='mean')  # reduction: 'none' | 'mean' | 'sum'
 
     if args.resume_epoch > 0:
         start_iter = args.resume_epoch * epoch_size
@@ -154,37 +163,48 @@ def train():
         start_iter = 0
 
     # my code
-    f_loss = open('loss.csv', 'w', encoding='utf-8', newline="")
+    # 保存每个epoch的loss和acc，用来作图
+    save_dir = str(increment_path(Path(args.project) / args.name, exist_ok=False, mkdir=True))
+    print("save into", os.path.abspath(os.path.dirname(__file__)) + save_dir)
+    f_loss = open(save_dir + '/' + 'loss.csv', 'w', encoding='utf-8', newline="")
     csv_loss = csv.writer(f_loss)
     csv_loss.writerow(['epoch', 'loss'])
-    f_acc = open('acc.csv', 'w', encoding='utf-8', newline="")
+    f_acc = open(save_dir + '/' + 'acc.csv', 'w', encoding='utf-8', newline="")
     csv_acc = csv.writer(f_acc)
     csv_acc.writerow(['Total iter', 'Accuracy'])
     f_loss.close()
     f_acc.close()
     epoch_loss = [0, 0]
-
     global flag
     flag = 0
+
     for iteration in range(start_iter, int(max_iter)):
         if iteration % epoch_size == 0:
             # create batch iterator
             batch_iterator = iter(DataLoader(train_dataset, args.train_batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=collate_fn))
             loss_val = 0
+            scheduler.step()  # my code 更新lr
             epoch += 1
             if iteration != 0:  # my code
                 flag = 1
 
         if iteration !=0 and iteration % args.save_interval == 0:
-            torch.save(lprnet.state_dict(), args.save_folder + 'LPRNet_' + '_iteration_' + repr(iteration) + '.pth')
+            # torch.save(lprnet.state_dict(), args.save_folder + 'LPRNet_' + '_iteration_' + repr(iteration) + '.pth')
+            # my code
+            torch.save(lprnet.state_dict(), save_dir + 'LPRNet_' + '_iteration_' + repr(iteration) + '.pth')
+            plotChart('acc', save_dir)
+            plotChart('loss', save_dir)
 
         # 每2000个迭代进行一次模型评估
         if (iteration + 1) % args.test_interval == 0:
             acc = Greedy_Decode_Eval(lprnet, test_dataset, args)
-            f_acc = open('acc.csv', 'a', encoding='utf-8', newline="")
+            # my code
+            f_acc = open(save_dir + '/' + 'acc.csv', 'a', encoding='utf-8', newline="")
             csv_acc = csv.writer(f_acc)
             csv_acc.writerow([iteration + 1, acc])
             f_acc.close()
+            plotChart("acc", save_dir)
+            plotChart("loss", save_dir)
             # lprnet.train() # should be switch to train mode
 
         start_time = time.time()
@@ -206,7 +226,7 @@ def train():
 
         # forward
         logits = lprnet(images)
-        log_probs = logits.permute(2, 0, 1) # for ctc loss: T x N x C
+        log_probs = logits.permute(2, 0, 1)  # for ctc loss: T x N x C
         # print(labels.shape)
         log_probs = log_probs.log_softmax(2).requires_grad_()
         # log_probs = log_probs.detach().requires_grad_()
@@ -228,14 +248,20 @@ def train():
             #       + '|| Totel iter ' + repr(iteration) + ' || Loss: %.4f||' % (loss.item()) +
             #       'Batch time: %.4f sec. ||' % (end_time - start_time) + 'LR: %.8f' % (lr))
 
-            print('Epoch:' + repr(epoch) + ' || epochiter: ' + repr(iteration % epoch_size) + '/' + repr(epoch_size)
-                  + '|| Totel iter ' + repr(iteration) + ' || Loss: %.4f||' % (loss.item()) +
-                  'Batch time: %.4f sec. ||' % (end_time - start_time))
+            # my code
+            customed_format = "{:9}\t{:16}\t{:16}\t{:12}\t{:18}\t{:14}"
+            print(customed_format.format('Epoch:' + repr(epoch),
+                                         'epochiter: ' + repr(iteration % epoch_size) + '/' + repr(epoch_size),
+                                         'Totel iter ' + repr(iteration),
+                                         'Loss: %.4f' % (loss.item()),
+                                         'Batch time: %.4f' % (end_time - start_time),
+                                         'LR: %.8f' % optimizer.param_groups[0]['lr']
+                                          ))
 
             # my code
             # 每个epoch记录一次平均loss
             if flag == 1:
-                f_loss = open('loss.csv', 'a', encoding='utf-8', newline="")
+                f_loss = open(save_dir + '/' + 'loss.csv', 'a', encoding='utf-8', newline="")
                 csv_loss = csv.writer(f_loss)
                 csv_loss.writerow([epoch - 1, '%.4f' % (epoch_loss[0] / epoch_loss[1])])
                 f_loss.close()
@@ -250,13 +276,18 @@ def train():
     acc = Greedy_Decode_Eval(lprnet, test_dataset, args)
 
     # my code
-    f_acc = open('acc.csv', 'a', encoding='utf-8', newline="")
+    f_acc = open(save_dir + '/' + 'acc.csv', 'a', encoding='utf-8', newline="")
     csv_acc = csv.writer(f_acc)
     csv_acc.writerow([max_iter, acc])
     f_acc.close()
 
     # save final parameters
-    torch.save(lprnet.state_dict(), args.save_folder + 'Final_LPRNet_model.pth')
+    # torch.save(lprnet.state_dict(), args.save_folder + 'Final_LPRNet_model.pth')
+    torch.save(lprnet.state_dict(), save_dir + '/' + 'Final_LPRNet_model.pth')
+    print("model have saved to", save_dir)
+    plotChart("acc", save_dir)
+    plotChart("loss", save_dir)
+    print("data/plot have saved to", save_dir)
 
 
 # 模型评估
@@ -321,6 +352,8 @@ def Greedy_Decode_Eval(Net, datasets, args):
     t2 = time.time()
     print("[Info] Test Speed: {}s 1/{}]".format((t2 - t1) / len(datasets), len(datasets)))
     return '%.5f' % Acc
+
+
 
 
 if __name__ == "__main__":
