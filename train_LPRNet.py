@@ -183,7 +183,6 @@ def train():
             # create batch iterator
             batch_iterator = iter(DataLoader(train_dataset, args.train_batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=collate_fn))
             loss_val = 0
-            scheduler.step()  # my code 更新lr
             epoch += 1
             if iteration != 0:  # my code
                 flag = 1
@@ -191,7 +190,7 @@ def train():
         if iteration !=0 and iteration % args.save_interval == 0:
             # torch.save(lprnet.state_dict(), args.save_folder + 'LPRNet_' + '_iteration_' + repr(iteration) + '.pth')
             # my code
-            torch.save(lprnet.state_dict(), save_dir + 'LPRNet_' + '_iteration_' + repr(iteration) + '.pth')
+            torch.save(lprnet.state_dict(), save_dir + '/' + 'LPRNet_' + '_iteration_' + repr(iteration) + '.pth')
             plotChart('acc', save_dir)
             plotChart('loss', save_dir)
 
@@ -238,6 +237,8 @@ def train():
             continue
         loss.backward()
         optimizer.step()
+        if iteration % epoch_size == 0:
+            scheduler.step()  # my code 更新lr
         loss_val += loss.item()
         end_time = time.time()
         if iteration % 20 == 0:
@@ -253,7 +254,7 @@ def train():
             print(customed_format.format('Epoch:' + repr(epoch),
                                          'epochiter: ' + repr(iteration % epoch_size) + '/' + repr(epoch_size),
                                          'Totel iter ' + repr(iteration),
-                                         'Loss: %.4f' % (loss.item()),
+                                         'Loss: %.8f' % (loss.item()),
                                          'Batch time: %.4f' % (end_time - start_time),
                                          'LR: %.8f' % optimizer.param_groups[0]['lr']
                                           ))
